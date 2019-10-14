@@ -1,0 +1,91 @@
+import numpy as np
+from scipy.optimize import minimize_scalar
+from sklearn.base import clone
+import pandas as pd
+
+class HingeLoss():
+    def __init__(self):
+        pass
+    def loss(self, y_true, y_pred):
+        return np.mean(np.maximum(0, 1 - y_true*y_pred))
+    def negative_gradient(self, y_true, y_pred):
+        gradient = np.where(y_true*y_pred <= 1, -y_true, 0)
+        return -gradient
+    def move_in_good_direction(self, y_true, y_pred):
+        move = np.where(y_true*y_pred <= 1, y_true-y_pred, 0)
+        return move
+    
+class NegativeLogLikelihood():
+    def __init__(self):
+        pass
+    def loss(self, y_true, y_pred):
+        return np.mean(y_true*np.log(y_pred)+(1-y_true)*np.log(1-y_pred))
+    def negative_gradient(self, y_true, y_pred):
+        gradient = y_pred - y_true
+        return -gradient
+    def move_in_good_direction(self, y_true, y_pred):
+        return self.negative_gradient(y_true, y_pred)
+    
+class base_estimator():
+    def __init__(self, loss):
+        self.loss = loss
+        self.constant = 0
+    def fit(self, X, y):
+        def f(x):
+            return self.loss.loss(y, x)        
+        res = minimize_scalar(f, bounds=(-1, 1), method='bounded')
+        self.constant = res.x
+    def predict(self, X):
+        return np.ones(X.shape[0])*self.constant
+        
+class GradientBoostedLearner():
+    def __init__(self, weak_learner, 
+                 loss='Hinge', 
+                 subsample=1.0, 
+                 colsample=1.0, 
+                 num_estimators=100, 
+                 learning_rate=0.1, 
+                 learning_rate_decay=1.0,
+                 minimum_learning_rate=0.001):
+        if loss=='Hinge': self.loss = HingeLoss()
+        if loss=='neglogloss': self.loss = NegativeLogLikelihood()
+        self.subsample = subsample
+        self.colsample = colsample
+        self.num_estimators = num_estimators
+        self.learning_rate = learning_rate
+        self.learning_rate_decay = learning_rate_decay
+        self.minimum_learning_rate = minimum_learning_rate
+        self.weak_learner = weak_learner
+        self.estimators = []
+        self.estimator_cols = []
+        self.base_estimator = base_estimator(loss=self.loss)
+    def fit(self, X, y):
+        X = X.values
+        y = y.values
+        self.base_estimator.fit(X, y)
+        y_pred = self.base_estimator.predict(X)
+        learning_rate = self.learning_rate
+        for q in range(self.num_estimators):
+            print(q)
+            target = self.loss.move_in_good_direction(y, y_pred)
+            learner = clone(self.weak_learner)
+            rows = np.random.choice(np.arange(X.shape[0]), round(self.subsample*X.shape[0]), replace=False)
+            cols = np.random.choice(np.arange(X.shape[1]), round(self.colsample*X.shape[1]), replace=False)
+            self.estimator_cols.append(cols)
+            learner.fit(X[rows][:, cols], target[rows])
+            self.estimators.append(learner)
+            y_pred += learner.predict(X[:, cols]) * learning_rate
+            learning_rate = np.maximum(self.minimum_learning_rate, learning_rate*self.learning_rate_decay)
+        return y_pred
+    
+    def predict(self, X):
+        X = X.values
+        y_pred = self.base_estimator.predict(X)
+        learning_rate = self.learning_rate
+        for q in range(self.num_estimators):
+            learner = self.estimators[q]
+            cols = self.estimator_cols[q]
+            y_pred += learner.predict(X[:, cols]) * learning_rate
+            learning_rate = np.maximum(self.minimum_learning_rate, learning_rate*self.learning_rate_decay)
+        
+        return y_pred
